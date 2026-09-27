@@ -4,13 +4,16 @@ set -euo pipefail
 # Wires the rendered Noctalia palette into every Thunderbird profile:
 #   - prepends @import "<css_file>"; to chrome/userChrome.css
 #   - enables toolkit.legacyUserProfileCustomizations.stylesheets in user.js
-# Both edits are idempotent and skipped when the target file is not writable
-# (Nix / Home Manager profiles are read-only symlinks).
+# Both edits are idempotent. Anything that cannot be written is reported and
+# skipped instead of aborting the run.
 
 css_file="${XDG_CACHE_HOME:-$HOME/.cache}/noctalia/thunderbird/noctalia.css"
 import_line="@import \"$css_file\";"
-pref_line='user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);'
+pref_key='toolkit.legacyUserProfileCustomizations.stylesheets'
+pref_line="user_pref(\"$pref_key\", true);"
 marker="noctalia/thunderbird/noctalia.css"
+
+warn() { echo "thunderbird: $*" >&2; }
 
 roots=()
 for root in \
@@ -25,13 +28,14 @@ if [ "${#roots[@]}" -eq 0 ]; then
     exit 0
 fi
 
+# -L so profiles managed as symlinks are found too.
 profiles=()
 while IFS= read -r -d '' prefs; do
     profiles+=("$(dirname "$prefs")")
-done < <(find "${roots[@]}" -mindepth 2 -maxdepth 2 -type f -name prefs.js -print0)
+done < <(find -L "${roots[@]}" -mindepth 2 -maxdepth 2 -type f -name prefs.js -print0)
 
 if [ "${#profiles[@]}" -eq 0 ]; then
-    echo "thunderbird: no profile with prefs.js found under ${roots[*]}" >&2
+    warn "no profile with prefs.js found under ${roots[*]}"
     exit 1
 fi
 
@@ -39,11 +43,19 @@ for profile in "${profiles[@]}"; do
     chrome_dir="$profile/chrome"
     user_chrome="$chrome_dir/userChrome.css"
     user_js="$profile/user.js"
-    mkdir -p "$chrome_dir"
+
+    if [ ! -d "$chrome_dir" ] && ! mkdir -p "$chrome_dir" 2>/dev/null; then
+        warn "$chrome_dir cannot be created, skipping profile"
+        continue
+    fi
 
     # userChrome.css: @import has to be the very first line.
     if [ ! -e "$user_chrome" ]; then
-        printf '%s\n' "$import_line" >"$user_chrome"
+        if [ -w "$chrome_dir" ]; then
+            printf '%s\n' "$import_line" >"$user_chrome"
+        else
+            warn "$user_chrome cannot be created, skipping import"
+        fi
     elif grep -qF "$marker" "$user_chrome"; then
         : # already wired
     elif [ -w "$user_chrome" ]; then
@@ -53,15 +65,26 @@ for profile in "${profiles[@]}"; do
         cat "$tmp" >"$user_chrome"
         rm -f "$tmp"
     else
-        echo "thunderbird: $user_chrome is not writable, skipping import" >&2
+        warn "$user_chrome is not writable, skipping import"
     fi
 
-    # user.js: keep the pref, never duplicate it.
-    if [ -e "$user_js" ] && grep -qF 'toolkit.legacyUserProfileCustomizations.stylesheets' "$user_js"; then
-        : # pref already set
-    elif [ ! -e "$user_js" ] || [ -w "$user_js" ]; then
+    # user.js: keep the pref, never duplicate it, correct a stale false.
+    if [ ! -e "$user_js" ]; then
         printf '%s\n' "$pref_line" >>"$user_js"
-    else
-        echo "thunderbird: $user_js is not writable, set toolkit.legacyUserProfileCustomizations.stylesheets manually" >&2
+    elif ! grep -qF "$pref_key" "$user_js"; then
+        if [ -w "$user_js" ]; then
+            printf '%s\n' "$pref_line" >>"$user_js"
+        else
+            warn "$user_js is not writable, set $pref_key manually"
+        fi
+    elif grep -qE "$pref_key\",[[:space:]]*false" "$user_js"; then
+        if [ -w "$user_js" ]; then
+            tmp="$(mktemp "${user_js}.tmp.XXXXXX")"
+            sed -E "s/($pref_key\",[[:space:]]*)false/\1true/" "$user_js" >"$tmp"
+            cat "$tmp" >"$user_js"
+            rm -f "$tmp"
+        else
+            warn "$user_js sets $pref_key to false and is not writable"
+        fi
     fi
 done

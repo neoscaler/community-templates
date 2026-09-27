@@ -57,19 +57,25 @@ documents outside the reach of `userChrome.css`, and Noctalia only ships a
 ## How the wiring works
 
 `apply.sh` looks for `prefs.js` in the profiles under `~/.thunderbird`, the
-Flatpak path and the Snap path. In each profile it:
+Flatpak path and the Snap path. It follows symlinks, so profiles managed as
+symlinks are found too. In each profile it:
 
 - prepends `@import "<cache>/noctalia.css";` to `chrome/userChrome.css`
   (creating the file if needed),
-- appends
+- ensures
   `user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);`
-  to `user.js` if that preference is not set yet.
+  in `user.js`, correcting a stale `false`.
 
-Both steps are idempotent: re-applying never duplicates a line. Files that are
-not writable, for example profiles managed by Home Manager or another Nix module
-(read-only symlinks into the store), are left untouched with a warning on stderr.
-In that case set the preference and the `@import` from your system configuration
-instead.
+Both steps are idempotent: re-applying never duplicates a line. Anything that
+cannot be written, for example profiles managed by Home Manager or another Nix
+module (read-only symlinks into the store), is reported on stderr and skipped;
+other profiles are still wired. In that case set the preference and the
+`@import` from your system configuration instead.
+
+If no Thunderbird directory exists at all the hook exits silently, so it is a
+no-op on machines without Thunderbird. If a Thunderbird directory exists but no
+profile with `prefs.js` is found, the hook exits non-zero with a message on
+stderr.
 
 ## Uninstall
 
